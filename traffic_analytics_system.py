@@ -1,8 +1,3 @@
-"""
-Traffic Analytics System with AI-Powered Safety Recommendations
-Analyzes traffic patterns, near-misses, and generates safety insights using Gemini AI
-"""
-
 import os
 import json
 import numpy as np
@@ -14,12 +9,7 @@ import seaborn as sns
 from typing import Dict, List, Tuple
 import requests
 
-# ============================================================================
-# PART 1: ENHANCED DATA COLLECTION WITH ANALYTICS
-# ============================================================================
-
 class TrafficAnalyticsCollector:
-    """Enhanced data collector with detailed traffic analytics"""
 
     def __init__(self, output_dir='traffic_analytics'):
         self.output_dir = output_dir
@@ -40,17 +30,6 @@ class TrafficAnalyticsCollector:
 
     def collect_incident_data(self, carla_world, ego_vehicle, frame_number,
                              timestamp, weather='clear', time_of_day='day'):
-        """
-        Collect detailed incident data from CARLA
-
-        Parameters:
-        - carla_world: CARLA world object
-        - ego_vehicle: Main vehicle
-        - frame_number: Current frame
-        - timestamp: Current timestamp
-        - weather: Weather condition (clear, rain, fog, etc.)
-        - time_of_day: Time period (dawn, day, dusk, night)
-        """
         ego_location = ego_vehicle.get_location()
         ego_velocity = ego_vehicle.get_velocity()
         ego_speed_kmh = 3.6 * np.sqrt(ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2)
@@ -186,7 +165,6 @@ class TrafficAnalyticsCollector:
 
     def _classify_event_type(self, ego_vehicle, other_vehicle, distance,
                            other_speed, ego_speed):
-        """Classify the type of traffic event"""
         angle = abs(self._calculate_relative_angle(ego_vehicle, other_vehicle))
         speed_diff = abs(ego_speed - other_speed)
 
@@ -216,7 +194,6 @@ class TrafficAnalyticsCollector:
         return 'normal_interaction'
 
     def save_analytics_session(self, session_name):
-        """Save all collected analytics data"""
         output_path = os.path.join(self.output_dir, 'analytics',
                                    f'{session_name}_analytics.json')
 
@@ -237,7 +214,6 @@ class TrafficAnalyticsCollector:
 
 
     def _generate_summary(self):
-        """Generate summary statistics"""
         incidents = self.analytics_data['incidents']
 
         if not incidents:
@@ -256,20 +232,13 @@ class TrafficAnalyticsCollector:
         }
 
 
-# ============================================================================
-# PART 2: ANALYTICS PROCESSOR & VISUALIZER
-# ============================================================================
-
 class TrafficAnalyticsProcessor:
-    """Process and visualize traffic analytics data"""
-
     def __init__(self, analytics_file):
         with open(analytics_file, 'r') as f:
             self.data = json.load(f)
         self.incidents = pd.DataFrame(self.data['incidents'])
 
     def generate_comprehensive_report(self, output_dir='reports'):
-        """Generate comprehensive analytics report with visualizations"""
         os.makedirs(output_dir, exist_ok=True)
 
         report = {
@@ -294,7 +263,6 @@ class TrafficAnalyticsProcessor:
         return report
 
     def _analyze_summary(self):
-        """Overall summary statistics"""
         return {
             'total_incidents': len(self.incidents),
             'critical_incidents': len(self.incidents[self.incidents['severity'] == 'critical']),
@@ -321,7 +289,6 @@ class TrafficAnalyticsProcessor:
         }
 
     def _analyze_vehicle_patterns(self):
-        """Analyze incidents by vehicle type"""
         vehicle_involvement = self.incidents.groupby('vehicle_type').agg({
             'severity': lambda x: (x == 'critical').sum(),
             'distance': 'mean',
@@ -334,7 +301,6 @@ class TrafficAnalyticsProcessor:
         }
 
     def _analyze_location_hotspots(self):
-        """Identify location hotspots"""
         # Group nearby locations (within 10 units)
         locations = self.incidents[['location']].copy()
 
@@ -453,10 +419,6 @@ class TrafficAnalyticsProcessor:
         print(f"✓ Visualizations saved to {output_dir}/")
 
 
-# ============================================================================
-# PART 3: AI-POWERED SAFETY RECOMMENDATIONS (GEMINI INTEGRATION)
-# ============================================================================
-
 class AISafetyRecommendationEngine:
     """Generate AI-powered safety recommendations using Google Gemini"""
 
@@ -479,7 +441,6 @@ class AISafetyRecommendationEngine:
         if not self.api_key:
             return self._generate_rule_based_recommendations(analytics_report)
 
-        # Prepare data summary for AI
         prompt = self._create_analysis_prompt(analytics_report, intersection_name)
 
         try:
