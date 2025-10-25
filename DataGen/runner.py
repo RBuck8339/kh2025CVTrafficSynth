@@ -5,12 +5,8 @@ import os
 import sys
 import keyboard
 import numpy as np
-import psutil
 from PIL import Image
 from queue import Queue, Empty
-from multiprocessing import Pool, cpu_count
-import argparse
-
 
 # For imports
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -41,7 +37,7 @@ weather_settings = {
 # Traffic generation settings (counts are used; others handled in code)
 traffic_settings = {
     "number-of-vehicles": 60,
-    "number-of-walkers": 20,
+    "number-of-walkers": 30,
     "car-lights-on": True,
     "hybrid": True,
 }
@@ -74,15 +70,15 @@ class Runner:
     def load_carla_env(self):
         print("Launching CARLA...")
         exe_dir = os.path.dirname(CARLA_EXE)
-        self.proc = subprocess.Popen(
-            [CARLA_EXE, "-RenderOffScreen"],
+        proc = subprocess.Popen(
+            [CARLA_EXE, "-windowed", "-quality-level=Epic"],
             cwd=exe_dir,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
         print(f"⌛ Waiting {STARTUP_WAIT}s for CARLA to start...")
         time.sleep(STARTUP_WAIT)
-        return self.proc
+        return proc
 
     def set_weather(self):
         print("Changing the weather...")
@@ -218,9 +214,9 @@ class Runner:
         bp_sem.set_attribute('fov', '90')
         cam_sem = self.world.spawn_actor(bp_sem, cam_tf)
 
-        out_dir = f"DataGen/carla_captures/camera{self.cam_num}"
+        out_dir = f"DataGen/carla_captures/camera{self.cam_num}/raw"
         os.makedirs(out_dir, exist_ok=True)
-        semantic_out_dir = f"DataGen/carla_captures/camera{self.cam_num}_semantic"
+        semantic_out_dir = f"DataGen/carla_captures/camera{self.cam_num}/semantic"
         os.makedirs(semantic_out_dir, exist_ok=True)
         self.cam_num += 1
 
@@ -232,40 +228,19 @@ class Runner:
         # store both in self.cameras
         self.cameras.append((cam, q, out_dir))
         self.cameras.append((cam_sem, q_sem, semantic_out_dir))
-        
 
-    def save_image(self, task):
-        img_type, image, save_dir = task
 
-        if img_type == "rgb":
-            arr = np.frombuffer(image.raw_data, dtype=np.uint8)
-            arr = arr.reshape(image.height, image.width, 4)
-            rgb = arr[:, :, :3][:, :, ::-1]
-            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
-            Image.fromarray(rgb).save(fn)
+    def gather_metadata(self):
+        data = {
+            'close_call': ,
+            'collision': ,
+            
+        }
 
-        elif img_type == "sem":
-            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
-            image.save_to_disk(fn, carla.ColorConverter.CityScapesPalette)
-        print(f"✅ Wrote {img_type.upper()} image: {fn}")
-
-    def shutdown_carla(self):
-        if hasattr(self, "proc") and self.proc is not None:
-            print("🧹 Shutting down CARLA...")
-            try:
-                # Send CTRL+C or terminate gracefully first
-                self.proc.send_signal(signal.SIGTERM)
-                self.proc.wait(timeout=10)
-            except Exception:
-                # If still alive after 10s, kill it forcefully
-                print("⚠️ Force killing CARLA process...")
-                self.proc.kill()
-            finally:
-                self.proc = None
 
     def run(self):
         # If you want to auto-launch CARLA, uncomment the next line and also terminate in finally
-        #self.proc = self.load_carla_env()
+        # proc = self.load_carla_env()
         try:
             self.client = carla.Client("localhost", 2000)
             self.client.set_timeout(30.0)
@@ -302,12 +277,9 @@ class Runner:
             print("🎬 Recording… Press ESC to stop.")
             frame_idx = 0
 
-            pool = Pool(processes=min(4, cpu_count()))
-            pending_tasks = []
-
             while not keyboard.is_pressed("esc"):
                 frame = self.world.tick()
-                frame_idx += 1
+
                 # <--- MODIFIED: Add block to manage walkers
                 for controller in self.walker_controllers:
                     if not controller.is_alive:
@@ -325,17 +297,29 @@ class Runner:
                     except Exception:
                         pass # Actor might have been destroyed
 
-                    
-                    if frame_idx % 3 == 0:
-                        for cam, q, out_dir in self.cameras:
-                            try:
-                                img_type, image, save_dir = q.get(timeout=0.3)
-                            except Empty:
-                                continue
-                            # Queue the save to the worker pool instead of blocking
-                            pending_tasks.append(pool.apply_async(self.save_image, [(img_type, image, save_dir)]))
+                frame_idx += 1
+                if frame_idx % 3 == 0:
+                    for cam, q, out_dir in self.cameras:
+                        try:
+                            image = q.get(timeout=0.3)  # don’t let a single sensor stall ticks
+                        except Empty:
+                            continue
+
+                        img_type, image, save_dir = image  # ✅ unpack tuple
+
+                        if img_type == "rgb":
+                            arr = np.frombuffer(image.raw_data, dtype=np.uint8)
+                            arr = arr.reshape(image.height, image.width, 4)
+                            rgb = arr[:, :, :3][:, :, ::-1]
+                            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
+                            Image.fromarray(rgb).save(fn)
+                            print(f"Saved rgb image to {fn}")
 
 
+                        elif img_type == "sem":
+                            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
+                            image.save_to_disk(fn, carla.ColorConverter.CityScapesPalette)
+                            print(f"Saved segmented image to {fn}")
         finally:
             print("🧹 Cleaning up sensors and restoring settings...")
             for cam, _, _ in self.cameras:
@@ -345,6 +329,7 @@ class Runner:
                 except Exception:
                     pass
 
+            # <--- MODIFIED: Add cleanup for walker controllers
             print("...Destroying walker controllers...")
             for controller in self.walker_controllers:
                 try:
@@ -352,6 +337,7 @@ class Runner:
                     controller.destroy()
                 except Exception:
                     pass
+            # <--- END OF MODIFIED BLOCK
 
             if self.world:
                 try:
@@ -363,7 +349,12 @@ class Runner:
                 except Exception:
                     pass
 
-            #self.shutdown_carla()
+            # If you launched CARLA from this script, also terminate proc:
+            # try:
+            #     proc.terminate()
+            # except Exception:
+            #     pass
+
             print("✅ Done.")
 
 
