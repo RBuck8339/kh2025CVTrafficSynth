@@ -14,5 +14,9 @@ We included a comprehensive runner script in `DataGen/runner.py` that will open 
 
 You can then run this using the files seen in the Predictor directory
 
+## How to use the Data Analyst Helper
+cd into the gemini_helper folder and run the `gemini_prompt.py` and add the csv file. Then chat with the LLM and gather insights!
+
+
 # Made by
 Ronan Buck, Ahmet Cetin, Yussef Zahrani
