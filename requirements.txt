@@ -1,0 +1,6 @@
+ipykernel
+opencv
+pandas
+numpy
+matplotlib
+google-adk
