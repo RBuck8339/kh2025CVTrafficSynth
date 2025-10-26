@@ -5,12 +5,17 @@ import os
 import sys
 import keyboard
 import numpy as np
+import pickle
 from PIL import Image
 from queue import Queue, Empty
+import math
 
 # For imports
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 print(f"📂 CWD: {os.getcwd()}")
+
+
+# from srunner.scenariomanager.scenarioatomics.atomic_criteria import InTriggerDistanceToVehicle
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,7 +28,7 @@ weather_settings = {
     "precipitation": 0.0,
     "precipitation_deposits": 0.0,
     "wind_intensity": 0.0,
-    "fog_density": 4.0,
+    "fog_density": 3.0,
     "fog_distance": 0.1,
     "wetness": 0.0,
     "fog_falloff": 0.0,
@@ -36,17 +41,18 @@ weather_settings = {
 
 # Traffic generation settings (counts are used; others handled in code)
 traffic_settings = {
-    "number-of-vehicles": 60,
+    "number-of-vehicles": 80,
     "number-of-walkers": 30,
     "car-lights-on": True,
     "hybrid": True,
 }
 
-# A safe default camera; your earlier huge coords were off-map
+SCENE = "Sunny"  # Assign the most appropriate name from the weather
+
 camera_config = [
-    {'x': -30.093, 'y': 37.74, 'z': 14.396, 'pitch': -26.022, 'yaw': -136.872, 'roll': 0.0},
+    {'x': -30.093, 'y': 37.74, 'z': 14.396, 'pitch': -26.022, 'yaw': -136.872, 'roll': 0},
     {'x': -63.103, 'y': 2.151, 'z': 10.915, 'pitch': -28.45, 'yaw': 49.403, 'roll': 0},
-    {'x': 80.42337, 'y': -15.39008, 'z': 9.2415, 'pitch': -6.9456, 'yaw': 58.167, 'roll': 0},  # Needs work
+    {'x': 80.42337, 'y': -15.39008, 'z': 9.2415, 'pitch': -6.9456, 'yaw': 58.167, 'roll': 0}, 
     {'x': 93.338, 'y': 59.921, 'z': 11.431, 'pitch': -5.587, 'yaw': -59.91, 'roll': 0},
     {'x': -54.622, 'y': 147.594, 'z': 12.8097, 'pitch': -23.424, 'yaw': -50.695, 'roll': 0},
     {'x': -87.981, 'y': 38.2766, 'z': 9.045, 'pitch': -9.5793, 'yaw': -120.583, 'roll': 0},
@@ -55,7 +61,8 @@ camera_config = [
 ]
 
 STARTUP_WAIT = 30
-
+MAX_RUNTIME = 0.75 * 60 * 60  # 45 minutes
+start_time = time.time()
 
 class Runner:
     def __init__(self):
@@ -64,7 +71,12 @@ class Runner:
         self.world = None
         self.client = None
         self.tm = None
-        self.walker_controllers = [] # <--- MODIFIED: To store walker controllers
+        self.walker_controllers = [] 
+
+        # Constants used for determining camera boundaries and how we determine cars are in a picture
+        self.CAMERA_FOV = "90"
+        self.MAX_CAMERA_RADIUS = 35
+
 
     # Optional launcher if you want to start CarlaUE4.exe automatically
     def load_carla_env(self):
@@ -76,9 +88,10 @@ class Runner:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        print(f"⌛ Waiting {STARTUP_WAIT}s for CARLA to start...")
+        print(f"Waiting {STARTUP_WAIT}s for CARLA to start...")
         time.sleep(STARTUP_WAIT)
         return proc
+
 
     def set_weather(self):
         print("Changing the weather...")
@@ -103,19 +116,12 @@ class Runner:
             self.world.tick()
             time.sleep(0.05)
 
+
     def generate_traffic(self, num_vehicles=60, num_walkers=30):
         """Spawn randomized vehicles and pedestrians; lights on; per-vehicle speed diffs."""
-        print(f"🚗 Generating {num_vehicles} vehicles and {num_walkers} walkers...")
+        print(f"Generating {num_vehicles} vehicles and {num_walkers} walkers...")
 
         bp_lib = self.world.get_blueprint_library()
-        
-        # <--- MODIFIED: All TM setup is removed from here. 
-        # It's now done in run() *before* this function is called.
-        # self.tm = self.client.get_trafficmanager()
-        # self.tm.set_synchronous_mode(True)
-        # self.tm.set_hybrid_physics_mode(True)
-        # self.tm.global_percentage_speed_difference(0.0)
-        # self.tm.set_random_device_seed(int(time.time()))
 
         # ---------------- Vehicles ----------------
         veh_bps = bp_lib.filter("vehicle.*")
@@ -146,7 +152,7 @@ class Runner:
 
             vehicles.append(v)
 
-        print(f"✅ Spawned {len(vehicles)} vehicles.")
+        print(f"Spawned {len(vehicles)} vehicles.")
 
         # ---------------- Walkers ----------------
         walker_bps = bp_lib.filter("walker.pedestrian.*")
@@ -159,7 +165,7 @@ class Runner:
             if w:
                 walkers.append(w)
 
-        print(f"✅ Spawned {len(walkers)} walkers.")
+        print(f"Spawned {len(walkers)} walkers.")
 
         # Walker controllers
         self.walker_controllers = [] # <--- MODIFIED: Use class member
@@ -177,12 +183,13 @@ class Runner:
         print(f"🚶 Started {len(self.walker_controllers)} walker controllers.") # <--- MODIFIED
 
         # Warm-up ticks so TM & controllers actually begin moving
-        print("⌛ Warming up simulation...")
+        print("Warming up simulation...")
         for _ in range(10):
             self.world.tick()
             time.sleep(0.02)
 
         print("🌆 Traffic generation complete.")
+
 
     def _safe_camera_transform(self, cfg):
         """Clamp/adjust camera position to a valid spot on current map and above the road."""
@@ -199,24 +206,25 @@ class Runner:
 
         return carla.Transform(loc, rot)
 
+
     def make_camera(self, config):
         bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
-        bp.set_attribute('image_size_x', '1920')
-        bp.set_attribute('image_size_y', '1080')
-        bp.set_attribute('fov', '90')
+        bp.set_attribute('image_size_x', '1280')
+        bp.set_attribute('image_size_y', '720')
+        bp.set_attribute('fov', self.CAMERA_FOV)
 
         cam_tf = self._safe_camera_transform(config)
         cam = self.world.spawn_actor(bp, cam_tf)
 
         bp_sem = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
-        bp_sem.set_attribute('image_size_x', '1920')
-        bp_sem.set_attribute('image_size_y', '1080')
-        bp_sem.set_attribute('fov', '90')
+        bp_sem.set_attribute('image_size_x', '1280')
+        bp_sem.set_attribute('image_size_y', '720')
+        bp_sem.set_attribute('fov', self.CAMERA_FOV)
         cam_sem = self.world.spawn_actor(bp_sem, cam_tf)
 
-        out_dir = f"DataGen/carla_captures/camera{self.cam_num}/raw"
+        out_dir = f"DataGen/carla_captures/{SCENE}/camera{self.cam_num}/raw"
         os.makedirs(out_dir, exist_ok=True)
-        semantic_out_dir = f"DataGen/carla_captures/camera{self.cam_num}/semantic"
+        semantic_out_dir = f"DataGen/carla_captures/{SCENE}/camera{self.cam_num}/semantic"
         os.makedirs(semantic_out_dir, exist_ok=True)
         self.cam_num += 1
 
@@ -230,17 +238,179 @@ class Runner:
         self.cameras.append((cam_sem, q_sem, semantic_out_dir))
 
 
-    def gather_metadata(self):
-        data = {
-            'close_call': ,
-            'collision': ,
-            
+    def check_collision(self, present_vehicles_in_cameras):
+        """
+        COMPLETED
+        """
+        for collision in self.vehicle_collisions:
+            # Check if both vehicles are within the area
+            if any(collision["a_id"] == v.id for v in present_vehicles_in_cameras) and \
+            any(collision["b_id"] == v.id for v in present_vehicles_in_cameras):
+                return 1  # Set to true (we have found at least one collision here)
+
+        return 0
+
+
+    def check_close_calls(self, present_vehicles, present_pedestrians):
+        if not present_vehicles or not present_pedestrians:
+            return 0
+        
+        d_threshold = 3  # Can change freely  # TODO as a future update, analyze pedestrian state or model and use that instead
+        for v in present_vehicles:
+            try:
+                v_loc = v.get_transform().location
+            except RuntimeError:
+                continue  # vehicle destroyed or invalid
+
+            for w in present_pedestrians:
+                try:
+                    w_loc = w.get_transform().location
+                except RuntimeError:
+                    continue  # pedestrian destroyed or invalid
+
+                # Euclidean distance
+                dx = v_loc.x - w_loc.x
+                dy = v_loc.y - w_loc.y
+                dz = v_loc.z - w_loc.z
+                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+                if dist < d_threshold:
+                    return 1
+        return 0
+
+
+    def make_collision_sensor(self):
+        """
+        COMPLETED
+        """
+        bp = self.world.get_blueprint_library().find("sensor.other.collision")
+
+        # Attach to spectator to watch over all possible collisions
+        spectator = self.world.get_spectator()
+        transform = spectator.get_transform()
+        sensor = self.world.spawn_actor(bp, transform, attach_to=spectator)
+
+        self.vehicle_collisions = []
+
+        def on_collision(event):
+            a = event.actor
+            b = event.other_actor
+            if "vehicle." not in a.type_id or "vehicle." not in b.type_id:
+                return  # skip non-vehicle collisions
+
+            loc = event.transform.location
+            # We don't care about the magnitude of a crash, just if it happened
+            self.vehicle_collisions.append({
+                "a_id": a.id,
+                "b_id": b.id,
+                "a_type": a.type_id,
+                "b_type": b.type_id,
+                "x": loc.x,
+                "y": loc.y,
+                "z": loc.z,
+            })
+
+            print(f"Vehicle collision: {a.id} ↔ {b.id} at ({loc.x:.2f}, {loc.y:.2f})")
+
+        sensor.listen(on_collision)
+        self.global_vehicle_collision_sensor = sensor
+
+
+    def get_actors_in_view(self, camera):
+        cam_loc = camera.get_transform().location
+        all_actors = self.world.get_actors()
+
+        res = {
+            'vehicles': set(),
+            'walkers': set()
         }
+
+        for actor in all_actors:
+            # Only include actors with a transform (skip sensors, lights, etc.)
+            if not actor or not actor.is_alive:
+                continue
+
+            loc = actor.get_transform().location
+            dist = math.sqrt((loc.x - cam_loc.x)**2 + (loc.y - cam_loc.y)**2)
+            if dist > self.MAX_CAMERA_RADIUS:
+                continue
+
+            tid = actor.type_id
+
+            if tid.startswith('vehicle.'):
+                res['vehicles'].add(actor)
+            elif tid.startswith('walker.'):  # Counts both walking people and cyclists
+                res['walkers'].add(actor)
+
+        return res
+
+
+    def gather_metadata(self, all_actors, close_call_status, collision_status, output_path):
+        """
+        COMPLETED
+        Send all metadata to a pickle file, this will be organized by frame and used for multiple ML tasks
+        """
+        # Utility function for formatting
+        def vec3(v):
+            return (float(v.x), float(v.y), float(v.z))
+
+        vehicles_info = []
+        for actor in all_actors:
+            if not actor.is_alive:
+                continue
+            if not actor.type_id.startswith("vehicle."):
+                continue  # Skip pedestrians and sensors
+
+            try:
+                vehicles_info.append({
+                    'vehicle_id': actor.id,
+                    'vehicle_type': actor.type_id,
+                    'velocity': vec3(actor.get_velocity()),
+                    'acceleration': vec3(actor.get_acceleration()),
+                    'angular_velocity': vec3(actor.get_angular_velocity()),
+                    'lights_on': int(actor.get_light_state()) if hasattr(actor, "get_light_state") else None,
+                })
+            except Exception:
+                # Sometimes actor data is invalid (e.g., destroyed this tick)
+                continue
+
+        data = {
+            'close_call': int(close_call_status),
+            'collision': int(collision_status),
+            'vehicle_information': vehicles_info,
+        }
+
+
+        # # DEBUG
+        # print(f"\nMetadata for {os.path.basename(output_path)}")
+        # print(f"   Close call: {data['close_call']} | Collision: {data['collision']}")
+        # print(f"   Vehicles in view: {len(data['vehicle_information'])}")
+        # for v in data['vehicle_information'][:5]:  # print first 5 for brevity
+        #     print(f"     • {v['vehicle_type']} | ID {v['vehicle_id']} | v={v['velocity']} | a={v['acceleration']}")
+        # print("------------------------------------------------------")
+
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'wb') as f:
+            pickle.dump(data, f)
+
+
+    def metadata_wrapper(self, frame_num):
+        for cam_num, (cam, q, out_dir) in enumerate(self.cameras):
+            if 'semantic' in cam.type_id:
+                continue  # No need to double over it
+            actors = self.get_actors_in_view(cam)
+            close_call_status = self.check_close_calls(actors['vehicles'], actors['walkers'])
+            collision_status = self.check_collision(actors['vehicles'])
+            out_dir = f"DataGen/carla_captures/{SCENE}/camera{cam_num}/metadata"
+            os.makedirs(out_dir, exist_ok=True)
+            meta_path = os.path.join(out_dir, f"{frame_num}.pkl")
+
+            self.gather_metadata(actors['vehicles'], close_call_status, collision_status, meta_path)
 
 
     def run(self):
         # If you want to auto-launch CARLA, uncomment the next line and also terminate in finally
-        # proc = self.load_carla_env()
+        proc = self.load_carla_env()
         try:
             self.client = carla.Client("localhost", 2000)
             self.client.set_timeout(30.0)
@@ -250,16 +420,17 @@ class Runner:
             # --- Enable synchronous mode on world FIRST
             settings = self.world.get_settings()
             settings.synchronous_mode = True
-            settings.fixed_delta_seconds = 0.05  # 20 FPS
+            settings.fixed_delta_seconds = 0.0333  # 30 FPS
             self.world.apply_settings(settings)
 
             # --- Then Traffic Manager sync
-            # <--- MODIFIED: This is now the *only* place the TM is initialized
             self.tm = self.client.get_trafficmanager()
             self.tm.set_synchronous_mode(True)
             self.tm.set_hybrid_physics_mode(True)
             self.tm.global_percentage_speed_difference(0.0)
             self.tm.set_random_device_seed(int(time.time()))
+
+            self.make_collision_sensor()
 
             # Weather
             self.set_weather()
@@ -274,10 +445,13 @@ class Runner:
             for cam_cfg in camera_config:
                 self.make_camera(cam_cfg)
 
-            print("🎬 Recording… Press ESC to stop.")
+            print("Recording… Press ESC to stop.")
             frame_idx = 0
 
             while not keyboard.is_pressed("esc"):
+                if time.time() - start_time > MAX_RUNTIME:
+                    print("Time limit reached — stopping recording.")
+                    break
                 frame = self.world.tick()
 
                 # <--- MODIFIED: Add block to manage walkers
@@ -311,17 +485,21 @@ class Runner:
                             arr = np.frombuffer(image.raw_data, dtype=np.uint8)
                             arr = arr.reshape(image.height, image.width, 4)
                             rgb = arr[:, :, :3][:, :, ::-1]
-                            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
+                            fn = os.path.join(save_dir, f"frame_{frame_idx}.png")
                             Image.fromarray(rgb).save(fn)
                             print(f"Saved rgb image to {fn}")
 
 
                         elif img_type == "sem":
-                            fn = os.path.join(save_dir, f"frame_{image.frame:06d}.png")
+                            fn = os.path.join(save_dir, f"frame_{frame_idx}.png")
                             image.save_to_disk(fn, carla.ColorConverter.CityScapesPalette)
                             print(f"Saved segmented image to {fn}")
+
+                    self.metadata_wrapper(frame_idx)  # Get associated metadata
+                    self.vehicle_collisions.clear()  # Clear after processing all collisions in the current world state (tick)
+        
         finally:
-            print("🧹 Cleaning up sensors and restoring settings...")
+            print("Cleaning up sensors and restoring settings...")
             for cam, _, _ in self.cameras:
                 try:
                     cam.stop()
@@ -350,12 +528,12 @@ class Runner:
                     pass
 
             # If you launched CARLA from this script, also terminate proc:
-            # try:
-            #     proc.terminate()
-            # except Exception:
-            #     pass
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
-            print("✅ Done.")
+            print("Done.")
 
 
 if __name__ == "__main__":
