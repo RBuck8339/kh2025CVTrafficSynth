@@ -12,7 +12,6 @@ import math
 
 # For imports
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-print(f"📂 CWD: {os.getcwd()}")
 
 
 # from srunner.scenariomanager.scenarioatomics.atomic_criteria import InTriggerDistanceToVehicle
@@ -254,8 +253,11 @@ class Runner:
     def check_close_calls(self, present_vehicles, present_pedestrians):
         if not present_vehicles or not present_pedestrians:
             return 0
-        
-        d_threshold = 3  # Can change freely  # TODO as a future update, analyze pedestrian state or model and use that instead
+
+        # A realistic “near miss” threshold: ~4 meters
+        # (Pedestrian ≈ 0.5m radius; vehicle ≈ 1m radius; 4 meters ≈ sharp braking range)
+        d_threshold = 4.0     
+
         for v in present_vehicles:
             try:
                 v_loc = v.get_transform().location
@@ -268,14 +270,10 @@ class Runner:
                 except RuntimeError:
                     continue  # pedestrian destroyed or invalid
 
-                # Euclidean distance
-                dx = v_loc.x - w_loc.x
-                dy = v_loc.y - w_loc.y
-                dz = v_loc.z - w_loc.z
-                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-
-                if dist < d_threshold:
+                # Built-in CARLA distance (3D Euclidean)
+                if v_loc.distance(w_loc) < d_threshold:
                     return 1
+
         return 0
 
 
@@ -321,8 +319,8 @@ class Runner:
         all_actors = self.world.get_actors()
 
         res = {
-            'vehicles': set(),
-            'walkers': set()
+            'vehicles': [],
+            'walkers': []
         }
 
         for actor in all_actors:
@@ -338,19 +336,14 @@ class Runner:
             tid = actor.type_id
 
             if tid.startswith('vehicle.'):
-                res['vehicles'].add(actor)
+                res['vehicles'].append(actor)
             elif tid.startswith('walker.'):  # Counts both walking people and cyclists
-                res['walkers'].add(actor)
+                res['walkers'].append(actor)
 
         return res
 
 
-    def gather_metadata(self, all_actors, close_call_status, collision_status, output_path):
-        """
-        COMPLETED
-        Send all metadata to a pickle file, this will be organized by frame and used for multiple ML tasks
-        """
-        # Utility function for formatting
+    def gather_metadata(self, all_actors, close_call_status, collision_status, output_path, snapshot):
         def vec3(v):
             return (float(v.x), float(v.y), float(v.z))
 
@@ -359,19 +352,22 @@ class Runner:
             if not actor.is_alive:
                 continue
             if not actor.type_id.startswith("vehicle."):
-                continue  # Skip pedestrians and sensors
+                continue
 
             try:
+                # Directly from actor instead of snapshot
+                vel = actor.get_velocity()
+                acc = actor.get_acceleration()
+                ang_vel = actor.get_angular_velocity()
+
                 vehicles_info.append({
                     'vehicle_id': actor.id,
                     'vehicle_type': actor.type_id,
-                    'velocity': vec3(actor.get_velocity()),
-                    'acceleration': vec3(actor.get_acceleration()),
-                    'angular_velocity': vec3(actor.get_angular_velocity()),
-                    'lights_on': int(actor.get_light_state()) if hasattr(actor, "get_light_state") else None,
+                    'velocity': vec3(vel),
+                    'acceleration': vec3(acc),
+                    'angular_velocity': vec3(ang_vel),
                 })
             except Exception:
-                # Sometimes actor data is invalid (e.g., destroyed this tick)
                 continue
 
         data = {
@@ -380,21 +376,12 @@ class Runner:
             'vehicle_information': vehicles_info,
         }
 
-
-        # # DEBUG
-        # print(f"\nMetadata for {os.path.basename(output_path)}")
-        # print(f"   Close call: {data['close_call']} | Collision: {data['collision']}")
-        # print(f"   Vehicles in view: {len(data['vehicle_information'])}")
-        # for v in data['vehicle_information'][:5]:  # print first 5 for brevity
-        #     print(f"     • {v['vehicle_type']} | ID {v['vehicle_id']} | v={v['velocity']} | a={v['acceleration']}")
-        # print("------------------------------------------------------")
-
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, 'wb') as f:
             pickle.dump(data, f)
 
 
-    def metadata_wrapper(self, frame_num):
+    def metadata_wrapper(self, frame_num, snapshot):
         for cam_num, (cam, q, out_dir) in enumerate(self.cameras):
             if 'semantic' in cam.type_id:
                 continue  # No need to double over it
@@ -405,7 +392,7 @@ class Runner:
             os.makedirs(out_dir, exist_ok=True)
             meta_path = os.path.join(out_dir, f"{frame_num}.pkl")
 
-            self.gather_metadata(actors['vehicles'], close_call_status, collision_status, meta_path)
+            self.gather_metadata(actors['vehicles'], close_call_status, collision_status, meta_path, snapshot)
 
 
     def run(self):
@@ -426,7 +413,7 @@ class Runner:
             # --- Then Traffic Manager sync
             self.tm = self.client.get_trafficmanager()
             self.tm.set_synchronous_mode(True)
-            self.tm.set_hybrid_physics_mode(True)
+            self.tm.set_hybrid_physics_mode(False)
             self.tm.global_percentage_speed_difference(0.0)
             self.tm.set_random_device_seed(int(time.time()))
 
@@ -453,6 +440,7 @@ class Runner:
                     print("Time limit reached — stopping recording.")
                     break
                 frame = self.world.tick()
+                snapshot = self.world.get_snapshot()
 
                 # <--- MODIFIED: Add block to manage walkers
                 for controller in self.walker_controllers:
@@ -472,14 +460,14 @@ class Runner:
                         pass # Actor might have been destroyed
 
                 frame_idx += 1
-                if frame_idx % 3 == 0:
+                if frame_idx % 5 == 0:
                     for cam, q, out_dir in self.cameras:
                         try:
                             image = q.get(timeout=0.3)  # don’t let a single sensor stall ticks
                         except Empty:
                             continue
 
-                        img_type, image, save_dir = image  # ✅ unpack tuple
+                        img_type, image, save_dir = image  # unpack
 
                         if img_type == "rgb":
                             arr = np.frombuffer(image.raw_data, dtype=np.uint8)
@@ -495,7 +483,7 @@ class Runner:
                             image.save_to_disk(fn, carla.ColorConverter.CityScapesPalette)
                             print(f"Saved segmented image to {fn}")
 
-                    self.metadata_wrapper(frame_idx)  # Get associated metadata
+                    self.metadata_wrapper(frame_idx, snapshot)  # Get associated metadata
                     self.vehicle_collisions.clear()  # Clear after processing all collisions in the current world state (tick)
         
         finally:
