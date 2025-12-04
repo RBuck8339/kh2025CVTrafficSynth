@@ -13,10 +13,3 @@ CloseCalls uses the CARLA simulator in Unreal Engine 4 to generate realistic tra
 We included a comprehensive runner script in `DataGen/runner.py` that will open UE4 and simulate an environment as dictated by `traffic_settings` and `weather_settings`. This will generate data for (currently 8) traffic cameras and store them in `DataGen/carla_captures/{scene}/camera_{camera_num}/` for each camera
 
 You can then run this using the files seen in the Predictor directory
-
-## How to use the Data Analyst Helper
-cd into the gemini_helper folder and run the `gemini_prompt.py` and add the csv file. Then chat with the LLM and gather insights!
-
-
-# Made by
-Ronan Buck, Ahmet Cetin, Yussef Zahrani
