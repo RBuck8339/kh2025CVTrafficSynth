@@ -1,0 +1,8 @@
+pytorch
+torchvision
+tensorboard
+pandas
+matplotlib
+numpy
+opencv-python
+torchmetrics
