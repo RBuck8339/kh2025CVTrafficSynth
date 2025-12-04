@@ -15,8 +15,9 @@ def main(
     epochs: int = 100,
     batch_size: int = 4,
     learning_rate: float = 1e-2,
-    model: str = "DDRNet-23",
+    model_name: str = "DDRNet-23",
     checkpoint_path: Optional[str] = None,
+    save_path: str = "models/ddrnet_trained.pth",
     train_dataset: str = "cityscapes",
     train_path: str = "data/cityscapes_train",
     val_dataset: str = "cityscapes",
@@ -36,9 +37,9 @@ def main(
     train_loader = DataLoader(dataset=train_data, batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader = DataLoader(dataset=val_data, batch_size=1, shuffle=False)
 
-    if model == "DDRNet-23":
+    if model_name == "DDRNet-23":
         model = load_ddrnet()
-    elif model == "DDRNet-23-Slim":
+    elif model_name == "DDRNet-23-Slim":
         model = load_ddrnet_slim()
     else:
         raise Exception("Unsupported model")
@@ -63,6 +64,8 @@ def main(
 
     global_iter = 0
     max_iter = epochs * len(train_loader)
+
+    best_miou = 0
 
     for epoch in range(epochs):
         model.train()
@@ -156,6 +159,11 @@ def main(
 
         iou = tp.float() / union.clamp(min=1).float()
         val_miou = iou[union > 0].mean().item()
+
+        if val_miou > best_miou:
+            print(f"Saved at {best_miou} mIoU")
+            best_miou = val_miou
+            torch.save(model.state_dict(), save_path)
 
         train_loss_values.append(train_loss)
         train_miou_values.append(train_miou)
