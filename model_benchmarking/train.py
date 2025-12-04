@@ -9,7 +9,7 @@ from tqdm import tqdm
 import numpy as np
 import tyro
 
-from utils.DDRNet_23 import load_model as load_ddrnet
+from utils.DDRNet_23 import load_ddrnet, load_ddrnet_slim
 
 def main(
     epochs: int = 100,
@@ -38,6 +38,8 @@ def main(
 
     if model == "DDRNet-23":
         model = load_ddrnet()
+    elif model == "DDRNet-23-Slim":
+        model = load_ddrnet_slim()
     else:
         raise Exception("Unsupported model")
 

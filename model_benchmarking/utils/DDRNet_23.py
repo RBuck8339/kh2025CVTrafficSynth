@@ -338,7 +338,18 @@ class DualResNet(nn.Module):
         else:
             return x_
 
-def load_model():
+def load_ddrnet():
+    return DualResNet(
+        block=BasicBlock,
+        layers=[2, 2, 2, 2],
+        num_classes=19,
+        planes=64,
+        spp_planes=128,
+        head_planes=128,
+        augment=True
+    )
+
+def load_ddrnet_slim():
     return DualResNet(
         block=BasicBlock,
         layers=[2, 2, 2, 2],
